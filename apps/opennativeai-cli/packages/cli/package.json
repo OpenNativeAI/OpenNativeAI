@@ -1,0 +1,40 @@
+{
+  "name": "@opennativeai/cli",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Main CLI application for opennativeai",
+  "bin": {
+    "opennativeai": "./dist/opennativeai.cjs"
+  },
+  "files": [
+    "dist"
+  ],
+  "type": "module",
+  "main": "./dist/opennativeai.cjs",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "build:desktop-agent": "node scripts/build.mjs --desktop-agent",
+    "build:sea": "pnpm --dir ../../../.. exec turbo --skip-infer --cwd apps/opennativeai-cli run build --filter=!@opennativeai/cli --force && pnpm build && node scripts/build-sea.mjs --all",
+    "sea": "node scripts/build-sea.mjs",
+    "upload:sea": "node scripts/upload-sea-smb.mjs",
+    "clean": "node ../../scripts/clean-dist.mjs",
+    "dev": "tsx src/main.ts",
+    "typecheck": "tsc --noEmit",
+    "lint": "oxlint src",
+    "lint:fix": "oxlint --write src"
+  },
+  "dependencies": {
+    "@opennativeai/adapters": "workspace:*",
+    "@opennativeai/bootstrap": "workspace:*",
+    "@opennativeai/contracts": "workspace:*",
+    "@opennativeai/core": "workspace:*",
+    "@opennativeai/dynamic-workflow-runtime": "workspace:*",
+    "@opennativeai/i18n": "workspace:*",
+    "@opennativeai/provider-node": "workspace:*",
+    "@opennativeai/shared": "workspace:*",
+    "@opennativeai/shared-types": "workspace:*",
+    "@opennativeai/tui": "workspace:*",
+    "dotenv": "^17.4.2",
+    "playwright-core": "1.59.1"
+  }
+}

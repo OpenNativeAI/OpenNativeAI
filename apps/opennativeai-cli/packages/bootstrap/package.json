@@ -1,0 +1,45 @@
+{
+  "name": "@opennativeai/bootstrap",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./v4-replay": {
+      "types": "./dist/opennativeai-protocol-v4/replay.d.ts",
+      "import": "./dist/opennativeai-protocol-v4/replay.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "clean": "node ../../scripts/clean-dist.mjs",
+    "typecheck": "tsc --noEmit",
+    "lint": "oxlint src",
+    "lint:fix": "oxlint --write src"
+  },
+  "dependencies": {
+    "@opennativeai/adapters": "workspace:*",
+    "@opennativeai/contracts": "workspace:*",
+    "@opennativeai/core": "workspace:*",
+    "@opennativeai/dynamic-workflow": "workspace:*",
+    "@opennativeai/dynamic-workflow-runtime": "workspace:*",
+    "@opennativeai/i18n": "workspace:*",
+    "@opennativeai/provider": "workspace:*",
+    "@opennativeai/provider-node": "workspace:*",
+    "@opennativeai/shared": "workspace:*",
+    "@opennativeai/telemetry": "workspace:*",
+    "diff": "^9.0.0",
+    "zod": "4.6.5"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "@types/yazl": "^3.3.1",
+    "@opennativeai/formal-proof": "workspace:*",
+    "yazl": "^3.3.1"
+  }
+}

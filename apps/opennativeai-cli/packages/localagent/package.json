@@ -1,0 +1,33 @@
+{
+  "name": "@opennativeai/localagent",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Local-model agent runtime, spawned as an isolated CLI subprocess when the active provider is the desktop local text engine.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "bin": {
+    "opennativeai-localagent": "./dist/bin.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "clean": "node ../../scripts/clean-dist.mjs",
+    "dev": "tsx src/bin.ts",
+    "typecheck": "tsc --noEmit",
+    "lint": "oxlint src --no-ignore",
+    "lint:fix": "oxlint --fix src --no-ignore"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "@types/node": "^24.0.0"
+  }
+}

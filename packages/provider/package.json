@@ -1,0 +1,21 @@
+{
+  "name": "@opennativeai/provider",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "lint": "oxlint"
+  },
+  "dependencies": {
+    "@opennativeai/model-option-map": "workspace:*",
+    "@opennativeai/shared": "workspace:*",
+    "zod": "4.6.5"
+  },
+  "devDependencies": {
+    "typescript": "^6.0.2"
+  }
+}

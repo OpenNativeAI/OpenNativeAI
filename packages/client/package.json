@@ -1,0 +1,21 @@
+{
+  "name": "@opennativeai/client",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./globals": "./src/globals.d.ts"
+  },
+  "scripts": {
+    "lint": "oxlint",
+    "lint:fix": "oxlint --fix"
+  },
+  "dependencies": {
+    "@opennativeai/rpc": "workspace:*",
+    "@opennativeai/services": "workspace:*",
+    "@opennativeai/shared": "workspace:*"
+  },
+  "devDependencies": {
+    "typescript": "^6.0.2"
+  }
+}
