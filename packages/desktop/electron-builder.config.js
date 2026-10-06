@@ -9,7 +9,7 @@ import { loadBuiltinProviderConfig } from "../../scripts/builtin-provider-config
 import { noticesFileName, stageElectronNotices } from "../../scripts/third-party-notices.mjs";
 import { resolveNativeSearchReleasePlan } from "../../scripts/native-search-tools-config.mjs";
 import { getBuildMetadata } from "./scripts/build-metadata.mjs";
-import { collectRuntimeModuleClosureEntries } from "./scripts/runtime-dependency-closure.mjs";
+import { resolvePackagedRuntimeDependencies } from "./scripts/runtime-dependency-closure.mjs";
 import {
   resolvePackagedNodePtyPrebuildPath,
   restoreTargetNodePtyPrebuild,
@@ -294,48 +294,38 @@ function resolvePackagedResourcesDir(context) {
   return resolve(context.appOutDir, "resources");
 }
 
-function normalizeAsarEntry(entry) {
-  return entry.trim().replaceAll("\\", "/");
-}
-
+/**
+ * 汇总需要补进 app.asar 的运行时包。
+ *
+ * 判定口径集中在 resolvePackagedRuntimeDependencies：
+ * 1. REQUIRED_ASAR_RUNTIME_MODULES 手写名单——覆盖代码里动态 require、从 package.json
+ *    依赖树看不出来的那类包（undici、@babel/runtime 等）。
+ * 2. 从 out/{main,host,preload,scheduler} 实际 import 的包自动推导闭包——覆盖 pnpm
+ *    hoisted 布局下被 electron-builder 丢掉的版本冲突嵌套副本（chalk、parse-ms 等）。
+ * 补包位置沿用磁盘解析结果的嵌套层级：顶层依赖补到 /node_modules/<name>，
+ * 版本冲突的嵌套副本补到 /node_modules/<父包>/node_modules/<dep>，
+ * 这样包内的解析顺序和开发时一致，不会顶掉另一个消费者正在用的版本。
+ */
 function resolveMissingRuntimeModules(appAsarPath) {
-  const asarEntries = runAsarCommandAndReadStdout(["list", appAsarPath])
-    .split("\n")
-    .map(normalizeAsarEntry)
-    .filter(Boolean);
-  const asarEntrySet = new Set(asarEntries);
+  const { missing, unresolvable } = resolvePackagedRuntimeDependencies({
+    desktopRoot: desktopPackageRoot,
+    manualModuleNames: REQUIRED_ASAR_RUNTIME_MODULES,
+    moduleLookupRoots: runtimeModuleLookupRoots,
+    asarPath: appAsarPath,
+  });
 
-  const runtimeModules = collectRuntimeModuleClosureEntries(
-    REQUIRED_ASAR_RUNTIME_MODULES,
-    runtimeModuleLookupRoots,
-  );
-  const resolvableRuntimeModules = runtimeModules.filter((entry) => {
-    if (!entry.sourceModulePath) {
-      // 不同平台/安装布局下，部分运行时依赖可能被裁剪或未落到本次打包工作区。
-      // 之前这里直接在 copy 阶段抛错会中断整个平台出包；改为记录告警并跳过该模块，
-      // 让 afterPack 只处理当前环境确实可解析的依赖，避免 CI 因单个可选依赖缺失全量失败。
-      console.warn(
-        `[afterPack] runtime module not found, skip injection: ${entry.moduleName}; searched=${runtimeModuleLookupRoots
-          .map((lookupRoot) => resolve(lookupRoot, "node_modules", entry.moduleName))
-          .join(", ")}`,
-      );
-      return false;
-    }
-    return true;
-  });
-  return resolvableRuntimeModules.filter((entry) => {
-    const { moduleName } = entry;
-    const moduleRoot = `/node_modules/${moduleName}`;
-    if (asarEntrySet.has(moduleRoot)) {
-      return false;
-    }
-    for (const entry of asarEntrySet) {
-      if (entry.startsWith(`${moduleRoot}/`)) {
-        return false;
-      }
-    }
-    return true;
-  });
+  for (const entry of unresolvable) {
+    // 不同平台/安装布局下，部分运行时依赖可能被裁剪或未落到本次打包工作区。
+    // 之前这里直接在 copy 阶段抛错会中断整个平台出包；改为记录告警并跳过该模块，
+    // 让 afterPack 只处理当前环境确实可解析的依赖，避免 CI 因单个可选依赖缺失全量失败。
+    console.warn(
+      `[afterPack] runtime module not found, skip injection: ${entry.moduleName}; searched=${runtimeModuleLookupRoots
+        .map((lookupRoot) => resolve(lookupRoot, "node_modules", entry.moduleName))
+        .join(", ")}`,
+    );
+  }
+
+  return missing;
 }
 
 async function injectHoistedRuntimeModulesIntoAsar(context) {
@@ -366,11 +356,17 @@ async function injectHoistedRuntimeModulesIntoAsar(context) {
 
     const stagingNodeModulesDir = resolve(stagingDir, "node_modules");
     mkdirSync(stagingNodeModulesDir, { recursive: true });
+    // asarUnpack 出去的包在磁盘上有一份 app.asar.unpacked/node_modules/<pkg>，Node 运行时读的是
+    // 磁盘那份，补进 asar 里的同层目录会被遮蔽，所以父包在 unpacked 时也跟着补到 unpacked。
+    const unpackedNodeModulesDir = resolve(
+      resolvePackagedResourcesDir(context),
+      "app.asar.unpacked",
+      "node_modules",
+    );
 
     runTimedSync("afterPack:copy-runtime-modules", () => {
       for (const runtimeModule of missingRuntimeModules) {
-        const { moduleName, sourceModulePath } = runtimeModule;
-        const targetModulePath = resolve(stagingNodeModulesDir, moduleName);
+        const { moduleName, sourceModulePath, targetRelPath } = runtimeModule;
 
         if (!sourceModulePath) {
           throw new Error(
@@ -387,6 +383,14 @@ async function injectHoistedRuntimeModulesIntoAsar(context) {
         // 这里按 package.json 递归补齐依赖闭包，避免每次只补一个缺失包、上线后再暴露下一个子依赖。
         // 只靠 package.json 显式依赖、本包 node_modules 镜像、files include 都没让它稳定进 asar，
         // 所以在 afterPack 阶段直接重写 app.asar，先把这些运行时包补进去，再交给后续签名和出包。
+        // targetRelPath 保留磁盘上的嵌套层级（版本冲突时 pnpm 放 <父包>/node_modules/<dep>），
+        // 按同层落盘才能让两个同名不同版的消费者各用各的依赖。
+        const parentRelDir = dirname(targetRelPath);
+        const targetBaseDir =
+          parentRelDir !== "." && existsSync(resolve(unpackedNodeModulesDir, parentRelDir))
+            ? unpackedNodeModulesDir
+            : stagingNodeModulesDir;
+        const targetModulePath = resolve(targetBaseDir, targetRelPath);
         mkdirSync(dirname(targetModulePath), { recursive: true });
         rmSync(targetModulePath, { force: true, recursive: true });
         cpSync(sourceModulePath, targetModulePath, { recursive: true });

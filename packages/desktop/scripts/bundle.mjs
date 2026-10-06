@@ -11,7 +11,7 @@ import { createRequire } from "node:module";
 import process from "node:process";
 import { dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import { collectRuntimeModuleClosureEntries } from "./runtime-dependency-closure.mjs";
+import { resolvePackagedRuntimeDependencies } from "./runtime-dependency-closure.mjs";
 import { resolveDesktopProductIdentity } from "./desktop-product-identity.mjs";
 import {
   findDesktopNativePackageViolations,
@@ -651,7 +651,6 @@ function verifyPackagedRuntimeDependencies(os, arch) {
     // 直接执行锁定版本的 CLI，让 stdout 只包含 asar pack state，不靠放宽解析器吞掉未知输出。
     runAndReadStdout(process.execPath, [asarCliPath, "list", "--is-pack", appAsarPath]),
   );
-  const asarEntries = asarEntriesWithPackState.map((entry) => entry.path);
 
   const targetPlatformKey = `${os === "mac" ? "darwin" : os === "win" ? "win32" : os}-${arch}`;
   const nativePackageViolations = findDesktopNativePackageViolations(
@@ -664,38 +663,75 @@ function verifyPackagedRuntimeDependencies(os, arch) {
     throw new Error(`打包产物包含越界 native 资源:\n- ${nativePackageViolations.join("\n- ")}`);
   }
 
-  const runtimeModules = collectRuntimeModuleClosureEntries(
-    requiredRuntimeModules,
-    runtimeModuleLookupRoots,
-  );
-  const resolvableRuntimeModules = runtimeModules.filter((entry) => {
-    if (!entry.sourceModulePath) {
-      // afterPack 会按当前平台实际可解析依赖注入；bundle 校验也需保持同口径。
-      // 否则在某些 CI 安装布局中会出现“注入阶段已跳过，但校验阶段仍硬失败”的误报。
-      console.warn(
-        `[bundle] runtime module not found in workspace, skip verify: ${entry.moduleName}; searched=${runtimeModuleLookupRoots
-          .map((lookupRoot) => resolve(lookupRoot, "node_modules", entry.moduleName))
-          .join(", ")}`,
-      );
-      return false;
-    }
-    return true;
+  const { missing, unresolvable } = resolvePackagedRuntimeDependencies({
+    desktopRoot,
+    manualModuleNames: requiredRuntimeModules,
+    moduleLookupRoots: runtimeModuleLookupRoots,
+    asarPath: appAsarPath,
   });
 
-  for (const { moduleName } of resolvableRuntimeModules) {
-    const moduleRoot = `/node_modules/${moduleName}`;
-    // @electron/asar 在 Windows 下列目录时会通过 path.join 产出反斜杠路径，
-    // 之前这里按 POSIX 路径做精确匹配，导致模块其实已经打进 app.asar，校验却仍然误报缺失。
-    // 先统一归一化成正斜杠，避免 Windows 打包机被这道机械校验误伤。
-    const hasModule = asarEntries.some(
-      (entry) => entry === moduleRoot || entry.startsWith(`${moduleRoot}/`),
+  for (const entry of unresolvable) {
+    // afterPack 会按当前平台实际可解析依赖注入；bundle 校验也需保持同口径。
+    // 否则在某些 CI 安装布局中会出现“注入阶段已跳过，但校验阶段仍硬失败”的误报。
+    console.warn(
+      `[bundle] runtime module not found in workspace, skip verify: ${entry.moduleName}; searched=${runtimeModuleLookupRoots
+        .map((lookupRoot) => resolve(lookupRoot, "node_modules", entry.moduleName))
+        .join(", ")}`,
     );
-
-    if (!hasModule) {
-      // 校验也按依赖闭包展开，确保 afterPack 注入逻辑遗漏子依赖时能在 bundle 阶段直接失败。
-      throw new Error(`打包产物缺少运行时依赖 ${moduleName}: ${appAsarPath}`);
-    }
   }
+
+  if (missing.length > 0) {
+    // 与 afterPack 共用同一判定口径：手写名单（覆盖代码里动态 require 的包）加
+    // 从 out/{main,host,preload,scheduler} 实际 require 自动推导的依赖闭包。
+    // pnpm hoisted 布局下 electron-builder 会整批丢弃版本冲突的嵌套副本，
+    // 手写名单只能覆盖“已经 crash 过一轮”的那几个包，自动闭包才能防住下一个。
+    // afterPack 已按此口径补过一轮，这里仍报缺失说明补失败或补错了位置，
+    // 必须让 bundle 阶段直接失败，不能再把启动即报 ERR_MODULE_NOT_FOUND 的安装包交给用户。
+    const detail = missing
+      .slice(0, 20)
+      .map((entry) => {
+        const location = `node_modules/${entry.targetRelPath ?? entry.moduleName}`;
+        const requirement = entry.requiredRange ? ` 需要 ${entry.requiredRange}` : "";
+        return `- ${entry.moduleName}${requirement} @ ${location}${
+          entry.parentModuleName ? ` (被 ${entry.parentModuleName} 依赖)` : ""
+        }`;
+      })
+      .join("\n");
+    const more = missing.length > 20 ? `\n- ...共 ${missing.length} 个` : "";
+    throw new Error(`打包产物缺少运行时依赖:\n${detail}${more}\nasar: ${appAsarPath}`);
+  }
+}
+
+/**
+ * 确保 electron-builder 要打的 out/ 产物齐全。
+ *
+ * 修复依据：run-production-build.mjs 会先删掉 out/{main,host,preload,renderer} 再分别由
+ * tsup 和 vite 重写。只跑一半（或被中断）时 out/renderer 会消失，而 electron-builder 的
+ * files 按 out 目录通配收集，不会因为它为空而报错，结果安装完启动时主进程报
+ * “Not allowed to load local resource: .../app.asar/out/renderer/index.html”，
+ * 界面停在 Startup preparation failed。用 --skip-build 复用旧 out/ 时最容易踩到。
+ */
+function assertDesktopBuildOutputs(skipBuild) {
+  const requiredOutputs = [
+    "out/main/index.js",
+    "out/host/index.js",
+    // preload 由 tsup 以 CJS 输出（Electron sandbox 下的 preload 必须是 .cjs）。
+    "out/preload/index.cjs",
+    "out/renderer/index.html",
+  ];
+  const missing = requiredOutputs.filter(
+    (relativePath) => !existsSync(resolve(desktopRoot, relativePath)),
+  );
+  if (missing.length === 0) {
+    return;
+  }
+  throw new Error(
+    `打包前发现桌面产物缺失:\n- ${missing.join("\n- ")}\n目录: ${desktopRoot}${
+      skipBuild
+        ? "\n当前用了 --skip-build，请去掉该参数（或先跑 pnpm --filter @opennativeai/desktop run build）重新生成 out/。"
+        : "\n请确认 pnpm build 是否中途失败。"
+    }`,
+  );
 }
 
 async function main() {
@@ -731,6 +767,8 @@ async function main() {
   if (!skipBuild) {
     run(pnpmCommand, ["build"], buildEnv);
   }
+
+  assertDesktopBuildOutputs(skipBuild);
 
   await runTimedAsync("bundle:electron-builder", () =>
     runElectronBuilderWithRetry(buildArgs, buildEnv),
